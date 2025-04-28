@@ -288,6 +288,8 @@ impl Document {
         let idx = self.content.byte_to_char(self.position_byte);
         self.content.insert_char(idx, ch);
         self.position_byte += ch.len_utf8();
+
+        self.update_position_x();
     }
 
     pub fn remove_before(&mut self) {
@@ -296,6 +298,7 @@ impl Document {
         };
         self.position_byte -= self.content.char(idx).len_utf8();
         self.content.remove(idx..=idx);
+        self.update_position_x();
     }
 
     pub fn remove(&mut self) {
@@ -312,6 +315,8 @@ impl Document {
         if let Mode::Select { start_byte, .. } = &mut self.mode {
             *start_byte = *range.start();
         }
+
+        self.update_position_x();
     }
 }
 
