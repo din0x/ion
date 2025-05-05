@@ -1,7 +1,12 @@
-#![feature(if_let_guard, macro_metavar_expr, round_char_boundary, let_chains)]
+#![feature(
+    if_let_guard,
+    let_chains,
+    macro_metavar_expr,
+    round_char_boundary,
+    iter_map_windows
+)]
 
 use std::{io::stdout, path::PathBuf};
-
 use clap::Parser;
 use ratatui::crossterm::{self, cursor, queue};
 
