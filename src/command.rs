@@ -4,6 +4,7 @@ use crate::app::App;
 
 #[derive(Clone)]
 pub struct Command<T> {
+    #[allow(clippy::type_complexity)]
     action: Rc<dyn Fn(&mut App, T)>,
 }
 
