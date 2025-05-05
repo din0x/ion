@@ -48,6 +48,24 @@ pub fn init(app: &mut App) {
         'w',
         Command::new(|app, ()| {
             _ = app.document_mut().map(|(_, doc)| {
+                doc.move_next_word();
+                doc.scroll_to_cursor();
+            })
+        }),
+    );
+    app.keymap.insert(
+        'e',
+        Command::new(|app, ()| {
+            _ = app.document_mut().map(|(_, doc)| {
+                doc.move_next_word_end();
+                doc.scroll_to_cursor();
+            })
+        }),
+    );
+    app.keymap.insert(
+        'a',
+        Command::new(|app, ()| {
+            _ = app.document_mut().map(|(_, doc)| {
                 doc.scroll_up();
                 doc.move_to_view();
             })

@@ -1,5 +1,3 @@
-use std::ops::{Add, RangeInclusive};
-
 use ratatui::{
     buffer::{Buffer, Cell},
     layout::{Alignment, Constraint, Layout, Position, Rect},
@@ -7,6 +5,7 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 use ropey::Rope;
+use std::ops::{Add, RangeInclusive};
 
 use crate::theme::Theme;
 
@@ -248,6 +247,51 @@ impl Document {
         self.update_position_x();
     }
 
+    fn find_next_word(&self) -> Option<usize> {
+        let mut offset = self.position_byte;
+        let chars = self
+            .content
+            .chars_at(self.content.byte_to_char(self.position_byte));
+        chars
+            .map(|ch| {
+                let result = (offset, ch);
+                offset += ch.len_utf8();
+                result
+            })
+            .map_windows(|[(_, a), (byte, b)]| (*byte, CharKind::new(*a) != CharKind::new(*b)))
+            .filter_map(|(byte, is_boundary)| is_boundary.then_some(byte))
+            .next()
+    }
+
+    fn find_next_word_end(&mut self) -> Option<usize> {
+        let mut offset = self.position_byte;
+        let chars = self
+            .content
+            .chars_at(self.content.byte_to_char(self.position_byte));
+        chars
+            .map(|ch| {
+                let result = (offset, ch);
+                offset += ch.len_utf8();
+                result
+            })
+            .skip(1)
+            .map_windows(|[(byte, a), (_, b)]| (*byte, CharKind::new(*a) != CharKind::new(*b)))
+            .filter_map(|(byte, is_boundary)| (is_boundary).then_some(byte))
+            .next()
+    }
+
+    pub fn move_next_word(&mut self) {
+        self.position_byte = self.find_next_word().unwrap_or(self.content.len_bytes());
+        self.update_position_x();
+    }
+
+    pub fn move_next_word_end(&mut self) {
+        self.position_byte = self
+            .find_next_word_end()
+            .unwrap_or(self.content.len_bytes());
+        self.update_position_x();
+    }
+
     pub fn scroll_up(&mut self) {
         self.scroll_y = self.scroll_y.saturating_sub(1);
     }
@@ -329,4 +373,21 @@ pub enum Mode {
         start_byte: usize,
         line_mode: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharKind {
+    Lf,
+    Whitespace,
+    Other,
+}
+
+impl CharKind {
+    fn new(ch: char) -> Self {
+        match ch {
+            '\n' | '\r' => Self::Lf,
+            ch if ch.is_whitespace() => Self::Whitespace,
+            _ => Self::Other,
+        }
+    }
 }
