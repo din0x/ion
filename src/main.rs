@@ -6,9 +6,9 @@
     iter_map_windows
 )]
 
-use std::{io::stdout, path::PathBuf};
 use clap::Parser;
-use ratatui::crossterm::{self, cursor, queue};
+use ratatui::crossterm::{self, cursor, event, execute, queue, terminal};
+use std::{io::stdout, path::PathBuf};
 
 use app::App;
 
@@ -34,11 +34,19 @@ fn main() {
         _ = app.open_document(file);
     }
 
-    queue!(stdout(), cursor::SetCursorStyle::SteadyBlock).unwrap();
+    queue!(
+        stdout(),
+        cursor::SetCursorStyle::SteadyBlock,
+        event::EnableMouseCapture
+    )
+    .unwrap();
+
     let mut terminal = ratatui::init();
 
     while !app.exit {
+        execute!(stdout(), terminal::BeginSynchronizedUpdate).unwrap();
         terminal.draw(|frame| app.view(frame)).unwrap();
+        queue!(stdout(), terminal::EndSynchronizedUpdate).unwrap();
 
         let ev = crossterm::event::read().unwrap();
         app.handle_ev(ev);
