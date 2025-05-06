@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind},
+    crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind},
     layout::{Constraint, Layout},
     style::Stylize,
     widgets::{Paragraph, Widget},
@@ -129,6 +129,24 @@ impl App {
                 }
                 _ => {}
             },
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                ..
+            }) => {
+                if let Some((_, doc)) = &mut self.document {
+                    doc.scroll_up();
+                    doc.move_to_view();
+                }
+            }
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                ..
+            }) => {
+                if let Some((_, doc)) = &mut self.document {
+                    doc.scroll_down();
+                    doc.move_to_view();
+                }
+            }
             _ => {}
         }
     }
