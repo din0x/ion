@@ -379,6 +379,10 @@ impl Document {
     }
 
     pub fn remove(&mut self) {
+        if self.content.len_bytes() == 0 {
+            return;
+        }
+
         let range = self.selection();
         let start_char = self.content.byte_to_char(*range.start());
         let end_char = self
@@ -394,6 +398,7 @@ impl Document {
         }
 
         self.update_position_x();
+        self.scroll_to_cursor();
     }
 }
 
