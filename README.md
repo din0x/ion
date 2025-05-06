@@ -16,3 +16,4 @@ A modal text editor, written in Rust.
 | `l` | Move right | `move_right` |
 | `w` | Move next word start | `move_next_word_start` |
 | `e` | Move next word end | `move_next_word_end` |
+| `b` | Move previous word start | `move_prev_word_start` |

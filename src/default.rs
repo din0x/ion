@@ -63,6 +63,15 @@ pub fn init(app: &mut App) {
         }),
     );
     app.keymap.insert(
+        'b',
+        Command::new(|app, ()| {
+            _ = app.document_mut().map(|(_, doc)| {
+                doc.move_prev_word_start();
+                doc.scroll_to_cursor();
+            })
+        }),
+    );
+    app.keymap.insert(
         'a',
         Command::new(|app, ()| {
             _ = app.document_mut().map(|(_, doc)| {

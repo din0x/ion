@@ -280,6 +280,34 @@ impl Document {
             .next()
     }
 
+    fn find_prev_word_start(&mut self) -> Option<usize> {
+        let mut offset = self.position_byte
+            + self
+                .content
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or_default();
+
+        self.content
+            .chars_at(
+                self.content
+                    .byte_to_char(self.position_byte)
+                    .add(1)
+                    .min(self.content.len_chars()),
+            )
+            .reversed()
+            .map(|ch| {
+                let byte = offset;
+                offset -= ch.len_utf8();
+                (byte, ch)
+            })
+            .skip(1)
+            .map_windows(|[(_, a), (byte, b)]| (*byte, CharKind::new(*a) != CharKind::new(*b)))
+            .filter_map(|(byte, is_boundary)| (is_boundary).then_some(byte))
+            .next()
+    }
+
     pub fn move_next_word(&mut self) {
         self.position_byte = self.find_next_word().unwrap_or(self.content.len_bytes());
         self.update_position_x();
@@ -289,6 +317,11 @@ impl Document {
         self.position_byte = self
             .find_next_word_end()
             .unwrap_or(self.content.len_bytes());
+        self.update_position_x();
+    }
+
+    pub fn move_prev_word_start(&mut self) {
+        self.position_byte = self.find_prev_word_start().unwrap_or(0);
         self.update_position_x();
     }
 
