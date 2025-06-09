@@ -5,28 +5,32 @@ use ratatui::{
     style::Stylize,
     widgets::{Paragraph, Widget},
 };
+use ropey::Rope;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     error::Error,
     fs::File,
-    io::{self, BufReader, Read},
+    io::BufReader,
     path::{Path, PathBuf},
 };
 
 use crate::{
     command::Command,
     document::{Document, Mode},
+    input::Input,
     keymap::Keymap,
+    language::{self, Language},
     theme::Theme,
 };
 
 pub struct App {
-    document: Option<(PathBuf, Document)>,
-    documents: BTreeMap<PathBuf, Document>,
-    command: Option<String>,
+    pub doc: Document,
+    pub doc_name: Option<PathBuf>,
+    pub input: Option<Input>,
     err: Option<Box<dyn Error>>,
 
-    commands: HashMap<String, Command<()>>,
+    language: Language,
+    pub commands: HashMap<String, Command<()>>,
     pub keymap: Keymap,
     pub theme: Theme,
 
@@ -34,12 +38,19 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn open(path: &Path) -> Self {
+        let content = File::open(path)
+            .and_then(|file| Rope::from_reader(BufReader::new(file)))
+            .unwrap_or_default();
+
+        let doc = Document::new(content);
+
         Self {
-            document: None,
-            documents: BTreeMap::new(),
-            command: None,
+            doc,
+            doc_name: Some(path.into()),
+            input: None,
             err: None,
+            language: language::rust(),
             commands: HashMap::new(),
             keymap: Keymap::default(),
             theme: Theme::default(),
@@ -47,40 +58,46 @@ impl App {
         }
     }
 
-    pub fn document_mut(&mut self) -> Option<(&Path, &mut Document)> {
-        self.document
-            .as_mut()
-            .map(|(name, doc)| (name.as_path(), doc))
+    pub fn new() -> Self {
+        Self {
+            doc: Document::default(),
+            doc_name: None,
+            input: None,
+            err: None,
+            language: language::rust(),
+            commands: HashMap::new(),
+            keymap: Keymap::default(),
+            theme: Theme::default(),
+            exit: false,
+        }
     }
 
     pub fn view(&mut self, frame: &mut Frame) {
-        let [editor, command] =
+        let [editor, input_area] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
 
-        if let Some((_path, doc)) = &mut self.document {
-            if let Some(pos) = doc.render(&self.theme, editor, frame.buffer_mut()) {
-                frame.set_cursor_position(pos);
-            }
+        if let Some(pos) =
+            self.doc
+                .render(&mut self.language, &self.theme, editor, frame.buffer_mut())
+        {
+            frame.set_cursor_position(pos);
         }
 
-        match self.command.as_ref() {
-            Some(v) => {
-                Paragraph::new(format!(":{v}"))
-                    .style(self.theme.editor)
-                    .render(command, frame.buffer_mut());
+        match self.input.as_ref() {
+            Some(input) => {
+                let pos = input.render(&self.theme, frame.buffer_mut(), input_area);
 
-                frame.set_cursor_position((
-                    command.as_position().x + 1 + v.len() as u16,
-                    command.as_position().y,
-                ));
+                if let Some(pos) = pos {
+                    frame.set_cursor_position(pos);
+                }
             }
             None if let Some(err) = &self.err => {
                 Paragraph::new(err.to_string())
                     .style(self.theme.editor)
                     .red()
-                    .render(command, frame.buffer_mut());
+                    .render(input_area, frame.buffer_mut());
             }
-            None => frame.buffer_mut().set_style(command, self.theme.editor),
+            None => frame.buffer_mut().set_style(input_area, self.theme.editor),
         }
     }
 
@@ -92,35 +109,30 @@ impl App {
                 ..
             }) => match code {
                 KeyCode::Esc => {
-                    if self.command.is_none() {
-                        if let Some((_, doc)) = self.document_mut() {
-                            doc.enter_normal();
-                        }
+                    if self.input.is_none() {
+                        self.doc.enter_normal();
                     }
 
-                    self.command = None;
+                    self.input = None;
                     self.err = None;
                 }
 
-                KeyCode::Char(ch) if let Some(command) = self.command.as_mut() => command.push(ch),
-                KeyCode::Backspace if let Some(command) = self.command.as_mut() => {
-                    _ = command.pop()
-                }
-                KeyCode::Enter if let Some(command) = self.command.take() => {
-                    if let Err(err) = self.run_command(&command) {
-                        self.err = Some(err.into());
+                KeyCode::Char(ch) if let Some(input) = self.input.as_mut() => input.insert(ch),
+                KeyCode::Backspace if let Some(input) = self.input.as_mut() => input.remove(),
+                KeyCode::Enter if let Some(input) = self.input.take() => input.submit(self),
+                key if self.doc.mode() == Mode::Insert => match key {
+                    KeyCode::Enter => self.doc.insert('\n'),
+                    KeyCode::Char(ch) => self.doc.insert(ch),
+                    KeyCode::Backspace => self.doc.remove_before(),
+                    KeyCode::Tab => {
+                        let (x, _) = self.doc.position();
+                        let spaces = if x % 4 == 0 { 4 } else { 4 - x % 4 };
+                        for _ in 0..spaces {
+                            self.doc.insert(' ');
+                        }
                     }
-                }
-                key if let Some((_, doc)) = &mut self.document
-                    && doc.mode() == Mode::Insert =>
-                {
-                    match key {
-                        KeyCode::Enter => doc.insert('\n'),
-                        KeyCode::Char(ch) => doc.insert(ch),
-                        KeyCode::Backspace => doc.remove_before(),
-                        _ => {}
-                    }
-                }
+                    _ => {}
+                },
                 KeyCode::Char(':') => self.open_command(),
                 KeyCode::Char(key) => {
                     if let Some(command) = self.keymap.get(key).cloned() {
@@ -133,19 +145,15 @@ impl App {
                 kind: MouseEventKind::ScrollUp,
                 ..
             }) => {
-                if let Some((_, doc)) = &mut self.document {
-                    doc.scroll_up();
-                    doc.move_to_view();
-                }
+                self.doc.scroll_up();
+                self.doc.move_to_view();
             }
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 ..
             }) => {
-                if let Some((_, doc)) = &mut self.document {
-                    doc.scroll_down();
-                    doc.move_to_view();
-                }
+                self.doc.scroll_up();
+                self.doc.move_to_view();
             }
             _ => {}
         }
@@ -155,18 +163,8 @@ impl App {
         self.exit = true;
     }
 
-    pub fn open_document(&mut self, path: PathBuf) -> io::Result<()> {
-        let mut buf = String::new();
-        let mut reader = BufReader::new(File::open(&path)?);
-        reader.read_to_string(&mut buf)?;
-
-        let doc = Document::new(buf);
-        let Some((path, doc)) = self.document.replace((path, doc)) else {
-            return Ok(());
-        };
-
-        self.documents.insert(path, doc);
-        Ok(())
+    pub fn report_error(&mut self, err: impl Error + 'static) {
+        self.err = Some(Box::new(err));
     }
 
     fn run_command(&mut self, command: &str) -> Result<(), String> {
@@ -189,6 +187,13 @@ impl App {
     }
 
     fn open_command(&mut self) {
-        self.command = Some(String::new())
+        self.input = Some(
+            Input::new(|cmd, app| {
+                if let Err(err) = app.run_command(&cmd) {
+                    app.err = Some(err.into());
+                }
+            })
+            .with_symbol(':'),
+        );
     }
 }

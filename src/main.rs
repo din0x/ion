@@ -3,7 +3,8 @@
     let_chains,
     macro_metavar_expr,
     round_char_boundary,
-    iter_map_windows
+    iter_map_windows,
+    str_as_str
 )]
 
 use clap::Parser;
@@ -16,7 +17,9 @@ mod app;
 mod command;
 mod default;
 mod document;
+mod input;
 mod keymap;
+mod language;
 mod theme;
 
 #[derive(Parser)]
@@ -27,12 +30,13 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let mut app = App::new();
-    default::init(&mut app);
+    let mut app = if let Some(file) = args.file {
+        App::open(&file)
+    } else {
+        App::new()
+    };
 
-    if let Some(file) = args.file {
-        _ = app.open_document(file);
-    }
+    default::init(&mut app);
 
     queue!(
         stdout(),

@@ -1,17 +1,18 @@
 use ratatui::{
     buffer::{Buffer, Cell},
     layout::{Alignment, Constraint, Layout, Position, Rect},
-    style::{Style, Stylize},
     widgets::{Paragraph, Widget},
 };
 use ropey::Rope;
 use std::ops::{Add, RangeInclusive};
+use tree_sitter::{InputEdit, Parser, Point, Query, QueryCursor, QueryMatches, TextProvider, Tree};
 
-use crate::theme::Theme;
+use crate::{language::Language, theme::Theme};
 
 #[derive(Default)]
 pub struct Document {
     content: Rope,
+    tree: Option<Tree>,
     mode: Mode,
     position_byte: usize,
     position_x: usize,
@@ -22,9 +23,10 @@ pub struct Document {
 }
 
 impl Document {
-    pub fn new(s: String) -> Self {
+    pub fn new(content: Rope) -> Self {
         Self {
-            content: s.into(),
+            content,
+            tree: None,
             mode: Mode::Normal,
             position_byte: 0,
             position_x: 0,
@@ -59,8 +61,61 @@ impl Document {
         self.mode
     }
 
+    pub fn rope(&self) -> &Rope {
+        &self.content
+    }
+
+    pub fn parse(&mut self, parser: &mut Parser) -> &Tree {
+        let tree = parser
+            .parse_with(
+                &mut |byte, _| -> &[u8] {
+                    let Some((mut chunks, chunk_start, ..)) = self.rope().get_chunks_at_byte(byte)
+                    else {
+                        return &[];
+                    };
+
+                    let offset = byte - chunk_start;
+
+                    let Some(chunk) = chunks.next() else {
+                        return &[];
+                    };
+
+                    let chunk = &chunk[offset..];
+
+                    if chunk.is_empty() {
+                        for chunk in chunks {
+                            if !chunk.is_empty() {
+                                return chunk.as_bytes();
+                            }
+                        }
+                        &[]
+                    } else {
+                        chunk.as_bytes()
+                    }
+                },
+                self.tree.as_ref(),
+            )
+            .expect("Parser::set_language was called");
+
+        self.tree.insert(tree)
+    }
+
     #[must_use]
-    pub fn render(&mut self, theme: &Theme, area: Rect, buf: &mut Buffer) -> Option<Position> {
+    pub fn render(
+        &mut self,
+        language: &mut Language,
+        theme: &Theme,
+        area: Rect,
+        buf: &mut Buffer,
+    ) -> Option<Position> {
+        self.parse(language.parser());
+        let tree = self.tree.as_ref().unwrap();
+        let text_provider = RopeTextProvider::new(&self.content);
+        let mut query_cursor = QueryCursor::new();
+        let matches = query_cursor.matches(language.highlights(), tree.root_node(), text_provider);
+        let styles_vec = highlights_from_matches(language.highlights(), matches);
+        let mut styles = styles_vec.iter().peekable();
+
         let [editor, status] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
@@ -114,19 +169,26 @@ impl Document {
                 .alignment(Alignment::Right)
                 .render(nums, buf);
 
-            if self.position_byte == byte {
-                cursor = Some(text.as_position())
-            }
-
             let mut byte_x = byte;
 
-            for (ch, pos) in line.chars().zip(text.positions()) {
+            let mut positions = text.positions();
+            for (ch, pos) in line.chars().zip(&mut positions) {
                 let mut cell = Cell::EMPTY;
                 cell.set_char(ch);
                 cell.set_style(line_style);
 
+                while styles.peek().is_some_and(|p| p.before(byte_x)) {
+                    styles.next();
+                }
+
+                if let Some(peek) = styles.peek()
+                    && peek.contains(byte_x)
+                {
+                    cell.set_style(theme.get_token_style(peek.style));
+                }
+
                 if selection.contains(&byte_x) {
-                    cell.set_style(Style::new().on_light_blue());
+                    cell.set_style(theme.editor.patch(theme.selection));
                 }
 
                 if ch == '\n' {
@@ -136,10 +198,14 @@ impl Document {
                 buf[pos] = cell;
 
                 if self.position_byte == byte_x {
-                    cursor = Some(pos)
+                    cursor = Some(pos);
                 }
 
                 byte_x += ch.len_utf8();
+            }
+
+            if self.position_byte == byte_x {
+                cursor = positions.next()
             }
 
             byte += line.len_bytes();
@@ -159,7 +225,7 @@ impl Document {
         Paragraph::new(format!(" {mode}")).render(status, buf);
 
         let (line_idx, x_offset) = self.position();
-        Paragraph::new(format!("{line_idx}:{x_offset} "))
+        Paragraph::new(format!("{}:{} ", line_idx + 1, x_offset + 1))
             .style(theme.status_bar)
             .alignment(Alignment::Right)
             .render(status, buf);
@@ -209,12 +275,16 @@ impl Document {
 
     #[inline(always)]
     fn move_to(&mut self, line_idx: usize, x_byte: usize) {
-        let line_idx = line_idx.min(self.content.len_lines().saturating_sub(1));
+        let last_line_idx = self.content.len_lines().saturating_sub(1);
+        let line_idx = line_idx.min(last_line_idx);
 
         let line_start = self.content.line_to_byte(line_idx);
 
         let line = self.content.line(line_idx);
-        let x_offset = x_byte.min(line.len_bytes().saturating_sub(1));
+        let max_x_offset = line
+            .len_bytes()
+            .saturating_sub(if line_idx == last_line_idx { 0 } else { 1 });
+        let x_offset = x_byte.min(max_x_offset);
 
         self.position_byte = line_start + x_offset;
     }
@@ -364,15 +434,55 @@ impl Document {
     pub fn insert(&mut self, ch: char) {
         let idx = self.content.byte_to_char(self.position_byte);
         self.content.insert_char(idx, ch);
+
+        let (x, y) = self.position();
+        if let Some(tree) = &mut self.tree {
+            let new_end_byte = self.position_byte + ch.len_utf8();
+
+            let new_end_line = self.content.byte_to_line(new_end_byte);
+            let new_end_col = new_end_byte - self.content.line_to_byte(new_end_line);
+
+            tree.edit(&InputEdit {
+                start_byte: self.position_byte,
+                start_position: Point::new(y, x),
+                old_end_byte: self.position_byte,
+                old_end_position: Point::new(y, x),
+                new_end_byte,
+                new_end_position: Point::new(new_end_line, new_end_col),
+            });
+        }
+
         self.position_byte += ch.len_utf8();
 
         self.update_position_x();
+    }
+
+    fn byte_to_point(&self, byte: usize) -> Point {
+        let row = self.content.byte_to_line(byte);
+        let column = byte - self.content.line_to_byte(row);
+        Point::new(row, column)
     }
 
     pub fn remove_before(&mut self) {
         let Some(idx) = self.content.byte_to_char(self.position_byte).checked_sub(1) else {
             return;
         };
+
+        let byte_idx = self.content.char_to_byte(idx);
+        let point = self.byte_to_point(byte_idx);
+        let end_point = self.byte_to_point(self.position_byte);
+
+        if let Some(tree) = &mut self.tree {
+            tree.edit(&InputEdit {
+                start_byte: byte_idx,
+                start_position: point,
+                old_end_byte: self.position_byte,
+                old_end_position: end_point,
+                new_end_byte: byte_idx,
+                new_end_position: point,
+            });
+        }
+
         self.position_byte -= self.content.char(idx).len_utf8();
         self.content.remove(idx..=idx);
         self.update_position_x();
@@ -384,11 +494,27 @@ impl Document {
         }
 
         let range = self.selection();
+
+        let start_point = self.byte_to_point(*range.start());
+        let end_point = self.byte_to_point(*range.end());
+
+        if let Some(tree) = &mut self.tree {
+            tree.edit(&InputEdit {
+                start_byte: *range.start(),
+                start_position: start_point,
+                old_end_byte: *range.end(),
+                old_end_position: end_point,
+                new_end_byte: *range.start(),
+                new_end_position: start_point,
+            });
+        }
+
         let start_char = self.content.byte_to_char(*range.start());
         let end_char = self
             .content
             .byte_to_char(*range.end())
             .min(self.content.len_chars().saturating_sub(1));
+
         self.content.remove(start_char..=end_char);
 
         self.position_byte = *range.start();
@@ -427,5 +553,98 @@ impl CharKind {
             ch if ch.is_whitespace() => Self::Whitespace,
             _ => Self::Other,
         }
+    }
+}
+
+struct RopeByteChunksIterator<'a> {
+    chunks: ropey::iter::Chunks<'a>,
+    skip: usize,
+    chunk_byte_start: usize,
+    end: usize,
+}
+
+impl<'a> Iterator for RopeByteChunksIterator<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let chunk = self.chunks.next()?;
+        let mut part = &chunk[self.skip..];
+        let to_take = self.end - self.chunk_byte_start - self.skip;
+
+        if part.len() > to_take {
+            part = &part[..(part.len() - to_take)];
+        }
+
+        self.skip = 0;
+
+        Some(part.as_bytes())
+    }
+}
+
+struct RopeTextProvider<'a>(&'a Rope);
+
+impl<'a> RopeTextProvider<'a> {
+    fn new(rope: &'a Rope) -> Self {
+        Self(rope)
+    }
+}
+
+impl<'a> TextProvider<&'a [u8]> for RopeTextProvider<'a> {
+    type I = RopeByteChunksIterator<'a>;
+
+    fn text(&mut self, node: tree_sitter::Node) -> Self::I {
+        let start = node.start_byte();
+        let end = node.end_byte();
+        let (chunks, chunk_byte_start, ..) = self.0.chunks_at_byte(start);
+
+        RopeByteChunksIterator {
+            chunks,
+            skip: start - chunk_byte_start,
+            chunk_byte_start,
+            end,
+        }
+    }
+}
+
+fn highlights_from_matches<'a>(
+    query: &'a Query,
+    matches: QueryMatches<'a, 'a, RopeTextProvider<'a>, &'a [u8]>,
+) -> Vec<TokenStyle<'a>> {
+    let mut colors = Vec::new();
+
+    for mat in matches {
+        for cap in mat.captures {
+            let node = cap.node;
+
+            let start_byte = node.start_byte();
+            let end_byte = node.end_byte();
+
+            let scope = query.capture_names()[cap.index as usize];
+
+            colors.push(TokenStyle {
+                end_byte,
+                start_byte,
+                style: scope,
+            });
+        }
+    }
+
+    colors
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenStyle<'style> {
+    start_byte: usize,
+    end_byte: usize,
+    pub style: &'style str,
+}
+
+impl<'style> TokenStyle<'style> {
+    pub fn contains(&self, idx_byte: usize) -> bool {
+        (self.start_byte..self.end_byte).contains(&idx_byte)
+    }
+
+    pub fn before(&self, idx_byte: usize) -> bool {
+        self.end_byte < idx_byte
     }
 }
